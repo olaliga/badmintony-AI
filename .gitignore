@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+*.pyd
+*.pdb
+*.log
+*.sqlite3
+*.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# Mac/Windows
+.DS_Store
+Thumbs.db
+
+# 環境設定
+.env
+.venv/
+venv/
+ENV/
+
+# 影片檔案
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.webm
+*.m4v
+*.3gp
+*.mpeg
+*.mpg
+
+# 圖片檔案
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.tiff
+*.tif
+*.svg
+*.heic
+*.webp
+
+# 測試/分析結果
+results/
+TestVideo/
+*.csv
+*.npy
+*.npz
+*.h5
+*.pt
+*.ckpt
+*.onnx
+
+# 臨時檔案
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Matplotlib 臨時圖
+*temp_plot.png 

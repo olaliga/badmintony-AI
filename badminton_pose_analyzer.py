@@ -4,8 +4,11 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import os
+import subprocess
+import json
+import matplotlib.pyplot as plt
 
-class BadmintonPoseAnalyzer:
+class Badminton2DPoseAnalyzer:
     def __init__(self):
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
@@ -140,88 +143,162 @@ class BadmintonPoseAnalyzer:
             }
         }
 
-    def analyze_drive_pose(self, image_path):
-        """分析平球姿勢"""
-        # 檢查檔案是否存在
-        if not os.path.exists(image_path):
-            raise ValueError(f"找不到圖片檔案：{image_path}")
-            
-        # 使用 numpy 讀取圖片（支援中文路徑）
+    def get_video_rotation(self, video_path):
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream_tags=rotate', '-of', 'json', video_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        info = json.loads(result.stdout)
         try:
-            image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if image is None:
-                raise ValueError(f"無法讀取圖片：{image_path}，請確認圖片格式是否正確（支援 jpg、jpeg、png）")
-        except Exception as e:
-            raise ValueError(f"讀取圖片時發生錯誤：{str(e)}")
-        
-        # 轉換顏色空間
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # 進行姿勢檢測
-        results = self.pose.process(rgb_image)
-        
-        if not results.pose_landmarks:
-            raise ValueError("無法在圖片中檢測到人體姿勢，請確認圖片中有人物且姿勢清晰可見")
-        
-        # 計算測量值
-        measurements = self.calculate_drive_measurements(results.pose_landmarks.landmark)
-        
-        # 在圖片上繪製骨架
-        annotated_image = image.copy()
-        self.mp_draw.draw_landmarks(
-            annotated_image,
-            results.pose_landmarks,
-            self.mp_pose.POSE_CONNECTIONS
-        )
-        
-        # # 在圖片上顯示測量值
-        # y_position = 30
-        
-        # # 顯示角度
-        # cv2.putText(annotated_image, "角度測量：", (10, y_position),
-        #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        # y_position += 30
-        
-        # for angle_name, angle_value in measurements['angles'].items():
-        #     text = f"{angle_name}: {angle_value}°"
-        #     cv2.putText(annotated_image, text, (10, y_position),
-        #                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        #     y_position += 30
-        
-        # # 顯示位置
-        # y_position += 20
-        # cv2.putText(annotated_image, "位置測量：", (10, y_position),
-        #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        # y_position += 30
-        
-        # for pos_name, pos_value in measurements['positions'].items():
-        #     text = f"{pos_name}: x={pos_value['x']:.2f}, y={pos_value['y']:.2f}"
-        #     cv2.putText(annotated_image, text, (10, y_position),
-        #                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        #     y_position += 30
-        
-        # 儲存結果
+            rotation = int(info['streams'][0]['tags']['rotate'])
+        except (KeyError, IndexError):
+            rotation = 90
+        return rotation
+
+    def _prepare_image_for_concat(self, img, width, height, dtype):
+        """將圖片 resize 成指定寬高、轉成 BGR 3 channel、型態一致"""
+        if img is None:
+            raise ValueError("圖片讀取失敗，請檢查來源檔案")
+        # 若有 alpha channel，轉成 BGR
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        img = cv2.resize(img, (width, height))
+        img = img.astype(dtype)
+        return img
+
+    def analyze_drive_video(self, video_path, with_plot=True, angle_names=None):
+        """
+        分析平球姿勢影片，並可選擇同步輸出折線圖動畫合成影片。
+        """
+        import matplotlib.pyplot as plt
+        if angle_names is None:
+            angle_names = ['left_knee_angle', 'right_knee_angle', 'left_elbow_angle']
+
+        if not os.path.exists(video_path):
+            raise ValueError(f"找不到影片檔案：{video_path}")
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"無法讀取影片：{video_path}")
+
+        # 影片資訊
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # 輸出資料夾
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # 儲存標記後的圖片
-        output_image_path = os.path.join('results', f'drive_pose_{timestamp}.jpg')
-        cv2.imwrite(output_image_path, annotated_image)
-        
+        filename, extension = os.path.splitext(os.path.basename(video_path))
+        result_dir = os.path.join('results', f'pose_analysis_{filename}')
+        os.makedirs(result_dir, exist_ok=True)
+
+        # 輸出影片
+        output_video_path = os.path.join(result_dir, 'annotated_video.mp4')
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        rotation = self.get_video_rotation(video_path)
+        if rotation in [90, 270]:
+            out = cv2.VideoWriter(output_video_path, fourcc, fps, (height, width))
+            plot_width, plot_height = height, width
+        else:
+            out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+            plot_width, plot_height = width, height
+
+        # 合成影片（骨架+折線圖）
+        if with_plot:
+            output_combined_path = os.path.join(result_dir, 'combined_video.mp4')
+            out_combined = cv2.VideoWriter(output_combined_path, fourcc, fps, (2*plot_width, plot_height))
+
+        # 儲存所有幀的測量數據
+        angles_list = []
+        positions_list = []
+
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # 根據 rotation 旋轉
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.pose.process(rgb_image)
+
+            if results.pose_landmarks:
+                measurements = self.calculate_drive_measurements(results.pose_landmarks.landmark)
+                angles_list.append(measurements['angles'])
+                positions_list.append(measurements['positions'])
+                # 標記骨架
+                annotated_frame = frame.copy()
+                self.mp_draw.draw_landmarks(
+                    annotated_frame,
+                    results.pose_landmarks,
+                    self.mp_pose.POSE_CONNECTIONS
+                )
+            else:
+                annotated_frame = frame.copy()
+
+            # 寫入骨架影片
+            out.write(annotated_frame)
+
+            # --- 合成影片（骨架+折線圖）---
+            if with_plot:
+                # 動態繪製折線圖
+                plt.figure(figsize=(plot_width/100, plot_height/100), dpi=100)
+                for angle_name in angle_names:
+                    if len(angles_list) > 0 and angle_name in angles_list[0]:
+                        plt.plot(range(frame_idx+1), [a[angle_name] for a in angles_list], label=angle_name)
+                plt.xlim(0, total_frames)
+                if len(angles_list) > 0:
+                    y_min = min([min([a[angle_name] for a in angles_list]) for angle_name in angle_names if angle_name in angles_list[0]])
+                    y_max = max([max([a[angle_name] for a in angles_list]) for angle_name in angle_names if angle_name in angles_list[0]])
+                else:
+                    y_min, y_max = 0, 1
+                plt.ylim(y_min-10, y_max+10)
+                plt.xlabel('Frame')
+                plt.ylabel('Angle (deg)')
+                plt.title('Movement Angle Variation')
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig('temp_plot.png')
+                plt.close()
+                # 準備兩張圖
+                plot_img = cv2.imread('temp_plot.png', cv2.IMREAD_UNCHANGED)
+                annotated_frame_for_concat = self._prepare_image_for_concat(annotated_frame, plot_width, plot_height, annotated_frame.dtype)
+                plot_img_for_concat = self._prepare_image_for_concat(plot_img, plot_width, plot_height, annotated_frame.dtype)
+                combined = cv2.hconcat([annotated_frame_for_concat, plot_img_for_concat])
+                out_combined.write(combined)
+
+            frame_idx += 1
+
+        cap.release()
+        out.release()
+        if with_plot:
+            out_combined.release()
+            if os.path.exists('temp_plot.png'):
+                os.remove('temp_plot.png')
+
         # 儲存測量數據到CSV
-        df_angles = pd.DataFrame([measurements['angles']])
-        df_positions = pd.DataFrame([measurements['positions']])
-        
-        csv_angles_path = os.path.join('results', f'drive_angles_{timestamp}.csv')
-        csv_positions_path = os.path.join('results', f'drive_positions_{timestamp}.csv')
-        
+        df_angles = pd.DataFrame(angles_list)
+        df_positions = pd.DataFrame(positions_list)
+        csv_angles_path = os.path.join(result_dir, 'drive_angles.csv')
+        csv_positions_path = os.path.join(result_dir, 'drive_positions.csv')
         df_angles.to_csv(csv_angles_path, index=False)
         df_positions.to_csv(csv_positions_path, index=False)
-        
+
         return {
-            'measurements': measurements,
-            'annotated_image_path': output_image_path,
+            'annotated_video_path': output_video_path,
             'csv_angles_path': csv_angles_path,
-            'csv_positions_path': csv_positions_path
+            'csv_positions_path': csv_positions_path,
+            'total_frames': frame_idx,
+            'combined_video_path': output_combined_path if with_plot else None
         }
 
 def main():
@@ -229,29 +306,31 @@ def main():
     os.makedirs('results', exist_ok=True)
     
     # 初始化分析器
-    analyzer = BadmintonPoseAnalyzer()
+    analyzer = Badminton2DPoseAnalyzer()
     
-    # 請使用者輸入圖片路徑
-    image_path = input("請輸入平球姿勢圖片路徑：")
-    
+    # 請使用者輸入影片路徑
+    # video_path = input("請輸入平球姿勢影片路徑：")
+    video_paths = [os.path.join('TestVideo', file) for file in os.listdir('TestVideo') if file.endswith('.mp4') or file.endswith('.MOV')  ]   
+
     try:
-        # 分析圖片
-        results = analyzer.analyze_drive_pose(image_path)
-        
-        print("\n分析完成！")
-        print(f"標記後的圖片已儲存至：{results['annotated_image_path']}")
-        print(f"角度數據已儲存至：{results['csv_angles_path']}")
-        print(f"位置數據已儲存至：{results['csv_positions_path']}")
-        
-        # 顯示角度數據
-        print("\n角度測量：")
-        for angle_name, angle_value in results['measurements']['angles'].items():
-            print(f"{angle_name}: {angle_value}°")
+        for video_path in video_paths[:3]:
+            print(f"分析影片：{video_path}")
+            # 分析影片
+            results = analyzer.analyze_drive_video(video_path)
+            print("\n分析完成！")
+            print(f"標記後的影片已儲存至：{results['annotated_video_path']}")
+            print(f"角度數據已儲存至：{results['csv_angles_path']}")
+            print(f"位置數據已儲存至：{results['csv_positions_path']}")
             
-        # 顯示位置數據
-        print("\n位置測量：")
-        for pos_name, pos_value in results['measurements']['positions'].items():
-            print(f"{pos_name}: x={pos_value['x']:.2f}, y={pos_value['y']:.2f}")
+            # # 顯示角度數據
+            # print("\n角度測量：")
+            # for angle_name, angle_value in results['measurements']['angles'].items():
+            #     print(f"{angle_name}: {angle_value}°")
+                
+            # # 顯示位置數據
+            # print("\n位置測量：")
+            # for pos_name, pos_value in results['measurements']['positions'].items():
+            #     print(f"{pos_name}: x={pos_value['x']:.2f}, y={pos_value['y']:.2f}")
             
     except Exception as e:
         print(f"錯誤：{str(e)}")
